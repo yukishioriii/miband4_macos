@@ -1,0 +1,1 @@
+# Python Mi band 4 data export implementation for MacOS
