@@ -18,6 +18,58 @@ from bleak import BleakClient, BleakScanner
 logger = logging.getLogger(__name__)
 
 
+async def export_specs(client):
+    file = open("specs.txt", "w+")
+    logger.info("connected")
+    for service in client.services:
+        logger.info("[Service] %s", service)
+        file.write("[Service] %s\n" % service)
+
+        for char in service.characteristics:
+            if "read" in char.properties:
+                try:
+                    value = await client.read_gatt_char(char.uuid)
+                    logger.info(
+                        "  [Characteristic] %s (%s), Value: %r",
+                        char,
+                        ",".join(char.properties),
+                        value,
+                    )
+                    file.write("  [Characteristic] %s (%s), Value: %r\n" % (
+                        char, ",".join(char.properties), value))
+                except Exception as e:
+                    logger.error(
+                        "  [Characteristic] %s (%s), Error: %s",
+                        char,
+                        ",".join(char.properties),
+                        e,
+                    )
+                    file.write("  [Characteristic] %s (%s), Error: %r\n" % (
+                        char, ",".join(char.properties), value))
+
+            else:
+                logger.info(
+                    "  [Characteristic] %s (%s)", char, ",".join(
+                        char.properties)
+                )
+                file.write("  [Characteristic] %s (%s)\n" %
+                           (char, ",".join(char.properties)))
+
+            for descriptor in char.descriptors:
+                try:
+                    value = await client.read_gatt_descriptor(descriptor.handle)
+                    logger.info(
+                        "    [Descriptor] %s, Value: %r", descriptor, value)
+                    file.write("    [Descriptor] %s, Value: %r\n" %
+                               (descriptor, value))
+
+                except Exception as e:
+                    logger.error(
+                        "    [Descriptor] %s, Error: %s", descriptor, e)
+                    file.write("    [Descriptor] %s, Error: %r\n" %
+                               (descriptor, value))
+
+
 async def main(args: argparse.Namespace):
     logger.info("starting scan...")
 
@@ -26,7 +78,8 @@ async def main(args: argparse.Namespace):
             args.address, cb=dict(use_bdaddr=args.macos_use_bdaddr)
         )
         if device is None:
-            logger.error("could not find device with address '%s'", args.address)
+            logger.error(
+                "could not find device with address '%s'", args.address)
             return
     else:
         device = await BleakScanner.find_device_by_name(
@@ -37,53 +90,12 @@ async def main(args: argparse.Namespace):
             return
 
     logger.info("connecting to device...")
-    file = open("specs.txt", "w+")
 
     async with BleakClient(
         device,
         services=args.services,
     ) as client:
-        logger.info("connected")
-
-        for service in client.services:
-            logger.info("[Service] %s", service)
-            file.write("[Service] %s\n" % service)
-
-            for char in service.characteristics:
-                if "read" in char.properties:
-                    try:
-                        value = await client.read_gatt_char(char.uuid)
-                        logger.info(
-                            "  [Characteristic] %s (%s), Value: %r",
-                            char,
-                            ",".join(char.properties),
-                            value,
-                        )
-                        file.write("  [Characteristic] %s (%s), Value: %r\n" % (char, ",".join(char.properties), value))
-                    except Exception as e:
-                        logger.error(
-                            "  [Characteristic] %s (%s), Error: %s",
-                            char,
-                            ",".join(char.properties),
-                            e,
-                        )
-                        file.write("  [Characteristic] %s (%s), Error: %r\n" % (char, ",".join(char.properties), value))
-
-                else:
-                    logger.info(
-                        "  [Characteristic] %s (%s)", char, ",".join(char.properties)
-                    )
-                    file.write("  [Characteristic] %s (%s)\n" % (char, ",".join(char.properties)))
-
-                for descriptor in char.descriptors:
-                    try:
-                        value = await client.read_gatt_descriptor(descriptor.handle)
-                        logger.info("    [Descriptor] %s, Value: %r", descriptor, value)
-                        file.write("    [Descriptor] %s, Value: %r\n" % (descriptor, value))
-
-                    except Exception as e:
-                        logger.error("    [Descriptor] %s, Error: %s", descriptor, e)
-                        file.write("    [Descriptor] %s, Error: %r\n" % (descriptor, value))
+        export_specs(client)
 
         logger.info("disconnecting...")
 

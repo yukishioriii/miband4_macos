@@ -19,20 +19,20 @@ class Characteristic:
         self.char_specifier = char_specifier
         self.client = client
 
-    async def write(self, value):
-        await self.client.write_gatt_char(self.char_specifier, value)
+    async def write(self, value, response=False):
+        await self.client.write_gatt_char(self.char_specifier, value, response=False)
 
     async def read(self):
         return await self.client.read_gatt_char(self.char_specifier)
 
 
 class Descriptor:
-    def __init__(self, char_specifier: str, client: BleakClient) -> None:
+    def __init__(self, char_specifier: int, client: BleakClient) -> None:
         self.char_specifier = char_specifier
         self.client = client
 
-    async def write(self, value):
-        await self.client.write_gatt_descriptor(self.char_specifier, value)
+    async def write(self, value, response=False):
+        await self.client.write_gatt_char(self.char_specifier, value, response)
 
     async def read(self):
         return await self.client.read_gatt_descriptor(self.char_specifier)
@@ -68,7 +68,6 @@ class StepChar(Characteristic):
         steps = struct.unpack('h', a[1:3])[0] if len(a) >= 3 else None
         meters = struct.unpack('h', a[5:7])[0] if len(a) >= 7 else None
         fat_burned = struct.unpack('h', a[2:4])[0] if len(a) >= 4 else None
-        # why only 1 byte??
         calories = struct.unpack('b', a[9:10])[0] if len(a) >= 10 else None
         return {
             "steps": steps,
@@ -79,36 +78,71 @@ class StepChar(Characteristic):
 
 
 class ActivityGetter:
-    def __init__(self) -> None:
-        self.fetch_char = FetchChar()
-        self.
+    """
+    + write to notification_decs
+    + fetch_char handle initiating/ending device streaming data
+    + activity_char handle parsing actual data
+    """
 
+    def __init__(self, utc_offset: bytearray, client: BleakClient) -> None:
+        temp = datetime.now()
+        self.start = datetime(temp.year, temp.month, temp.day)
+        self.end = datetime.now()
+        self.next_timestamp = self.start
+        self.utc_offset = utc_offset
+        self.client = client
 
-class FetchChar(Characteristic):
-    def __init__(self, start, end, utc_offset, pkg, char_specifier: str, client: BleakClient):
-        super().__init__(char_specifier, client)
-        self.desc = Descriptor(char_specifier, client)
-        self.listening = False
-        self.time_offset = utc_offset
-        self.start_timestamp = start
-        self.end_timestamp = end
-        self.getting_timestamp = start
-        self.pkg = pkg
+        self.fetch_char = FetchChar(
+            self.next_timestamp, UUIDS.CHARACTERISTIC_FETCH, client)
+
+        self.fetch_decs = Descriptor(60, client)
+        self.activity_char = ActivityChar(
+            UUIDS.CHARACTERISTIC_ACTIVITY_DATA, client)
+        self.activity_desc = Descriptor(63, client)
 
     async def set_descriptor(self, value: True | False):
         if value:
-            await self.desc.write(b"\x01\x00")
+            await self.fetch_decs.write(b"\x01\x00", True)
+            await self.activity_desc.write(b"\x01\x00", True)
         else:
-            await self.desc.write(b"\x00\x00")
+            await self.fetch_decs.write(b"\x00\x00", True)
+            await self.activity_desc.write(b"\x00\x00", True)
 
-    async def send_fetch_payload(self):
-        if not self.listening:
-            await self.set_descriptor(True)
-            await asyncio.sleep(0.1)
-        ts = self._pack_timestamp(self.start_timestamp)
-        payload = b'\x01\x01' + ts + self.utc_offset
+    async def get(self):
+        await self.set_descriptor(True)
+        await self.fetch_char.init_handler()
+        await self.fetch_char.send_fetch_payload(self.utc_offset)
+        await self.activity_char.init_handler()
+
+
+class ActivityChar(Characteristic):
+    def __init__(self, char_specifier: str, client: BleakClient) -> None:
+        super().__init__(char_specifier, client)
+
+    async def _callback(self, _, data):
+        print(f"LOG [Activity]: {data}")
+        i = 1
+        while i < len(data):
+            category = struct.unpack("<B", data[i:i + 1])[0]
+            intensity = struct.unpack("B", data[i + 1:i + 2])[0]
+            steps = struct.unpack("B", data[i + 2:i + 3])[0]
+            heart_rate = struct.unpack("B", data[i + 3:i + 4])[0]
+            print(category, intensity, steps, heart_rate)
+            i += 4
+
+    async def init_handler(self):
+        await self.client.start_notify(self.char_specifier, self._callback)
+
+
+class FetchChar(Characteristic):
+    def __init__(self, next_timestamp: datetime, char_specifier: str, client: BleakClient):
+        super().__init__(char_specifier, client)
+        self.next_timestamp = next_timestamp
+
+    async def send_fetch_payload(self, utc_offset: bytearray):
+        ts = self._pack_timestamp(self.next_timestamp)
+        payload = b'\x01\x01' + ts + utc_offset
         self.write(payload)
-        self.listening = True
 
     def _pack_timestamp(self, timestamp: datetime):
         year = struct.pack("<H", timestamp.year)
@@ -119,21 +153,21 @@ class FetchChar(Characteristic):
         ts = year + month + day + hour + minute
         return ts
 
-    async def callback(self, char_specifier, data):
+    async def _callback(self, _, data):
+        print(f"LOG [FETCH]: {data}")
         if data[:3] == b'\x10\x01\x01':
             year = struct.unpack("<H", data[7:9])[0]
             month = struct.unpack("b", data[9:10])[0]
             day = struct.unpack("b", data[10:11])[0]
             hour = struct.unpack("b", data[11:12])[0]
             minute = struct.unpack("b", data[12:13])[0]
-            self.getting_timestamp = datetime(year, month, day, hour, minute)
-            print(f"Fetch data from {self.getting_timestamp}")
-            self.pkg = 0  # reset the packing index
+            self.next_timestamp = datetime(year, month, day, hour, minute)
+            print(f"actually fetching data from {self.next_timestamp}")
+            # self.pkg = 0
             self.write(b'\x02')
         elif data[:3] == b'\x10\x02\x01':
             if self.activity_getter.last_timestamp > self.activity_getter.end_timestamp - timedelta(minutes=1):
                 print("Finished fetching")
-                
                 return
             await asyncio.sleep(1)
             t = self.device.last_timestamp + timedelta(minutes=1)
@@ -142,13 +176,11 @@ class FetchChar(Characteristic):
 
         elif data[:3] == b'\x10\x02\x04':
             print("No more activity fetch possible")
-            return
         else:
-            print("Unexpected data on handle " + str(hnd) + ": " + str(data))
-            return
+            print(f"Unexpected data on handle {str(data)}")
 
     async def init_handler(self):
-        await self.client.start_notify(self.char_specifier, self.callback)
+        await self.client.start_notify(self.char_specifier, self._callback)
 
 
 class AuthenticateChar(Characteristic):
@@ -162,13 +194,14 @@ class AuthenticateChar(Characteristic):
         return aes.encrypt(random_string)
 
     async def _send_encoded_key(self, data):
-        cmd = struct.pack('<2s', b'\x03\x00') + self._encrypt_string_with_key(data)
+        cmd = struct.pack('<2s', b'\x03\x00') + \
+            self._encrypt_string_with_key(data)
         send_cmd = struct.pack('<18s', cmd)
         await self.write(send_cmd)
         await asyncio.sleep(self.wac.timeout)
 
-    async def callback(self, char_specifier, data):
-        print(f"LOG [AUTH] CALLBACK: {data}")
+    async def _callback(self, char_specifier, data):
+        print(f"LOG [AUTH]: {data}")
         if data[:3] == b'\x10\x01\x01':
             self.write(RANDOM_BYTE)
         elif data[:3] == b'\x10\x01\x04':
@@ -191,7 +224,7 @@ class AuthenticateChar(Characteristic):
         await asyncio.sleep(self.wac.timeout)
 
     async def init_handler(self):
-        await self.client.start_notify(self.char_specifier, self.callback)
+        await self.client.start_notify(self.char_specifier, self._callback)
 
     async def stop_handler(self):
         print("stopping handler")
@@ -202,21 +235,30 @@ async def main():
     b = None
     while b is None:
         try:
-            print("scanning for 5 seconds, please wait...")
             a = Wac(MAC_ADDRESS)
             b = await a.connect()
         except Exception:
             print("retrying")
-    serial_number = await a.createChar(UUIDS.SERIAL_NUMBER)
-    auth = await a.createChar(UUIDS.CHARACTERISTIC_AUTH, special_type="AUTH")
-    print(await serial_number.read())
-    await auth.init_handler()
-    await auth.connect()
-    try:
-        step = await a.createChar(UUIDS.CHARACTERISTIC_STEPS, "STEP")
-        print(await step.read())
-    except Exception as e:
-        print(e)
+    auth_char = await a.createChar(UUIDS.CHARACTERISTIC_AUTH, special_type="AUTH")
+    await auth_char.init_handler()
+    await auth_char.connect()
+    auth_desc = Descriptor("00002902-0000-1000-8000-00805f9b34fb", a.client)
+    await auth_desc.write(b"\x01\x00")
+    # try:
+    # step = await a.createChar(UUIDS.CHARACTERISTIC_STEPS, "STEP")
+    # print(await step.read())
+
+    current_time = await a.createChar(UUIDS.CHARACTERISTIC_CURRENT_TIME)
+    current_time = await current_time.read()
+    utc_offset = current_time[9:11]
+
+    activity_getter = ActivityGetter(utc_offset, a.client)
+    await activity_getter.get()
+
+    await auth_desc.write(b"\x00\x00")
+
+    # except Exception as e:
+    #     print(e)
     # await auth.stop_handler()
 
 
