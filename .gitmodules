@@ -4,3 +4,6 @@
 [submodule "miband4"]
 	path = miband4
 	url = https://github.com/satcar77/miband4
+[submodule "bluepy"]
+	path = bluepy
+	url = git@github.com:IanHarvey/bluepy.git

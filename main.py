@@ -32,7 +32,7 @@ class Descriptor:
         self.client = client
 
     async def write(self, value, response=False):
-        await self.client.write_gatt_char(self.char_specifier, value, response)
+        await self.client.write_gatt_descriptor(self.char_specifier, value)
 
     async def read(self):
         return await self.client.read_gatt_descriptor(self.char_specifier)
@@ -95,21 +95,10 @@ class ActivityGetter:
         self.fetch_char = FetchChar(
             self.next_timestamp, UUIDS.CHARACTERISTIC_FETCH, client)
 
-        self.fetch_decs = Descriptor(60, client)
         self.activity_char = ActivityChar(
             UUIDS.CHARACTERISTIC_ACTIVITY_DATA, client)
-        self.activity_desc = Descriptor(63, client)
-
-    async def set_descriptor(self, value: True | False):
-        if value:
-            await self.fetch_decs.write(b"\x01\x00", True)
-            await self.activity_desc.write(b"\x01\x00", True)
-        else:
-            await self.fetch_decs.write(b"\x00\x00", True)
-            await self.activity_desc.write(b"\x00\x00", True)
 
     async def get(self):
-        await self.set_descriptor(True)
         await self.fetch_char.init_handler()
         await self.fetch_char.send_fetch_payload(self.utc_offset)
         await self.activity_char.init_handler()
@@ -142,7 +131,7 @@ class FetchChar(Characteristic):
     async def send_fetch_payload(self, utc_offset: bytearray):
         ts = self._pack_timestamp(self.next_timestamp)
         payload = b'\x01\x01' + ts + utc_offset
-        self.write(payload)
+        await self.write(payload)
 
     def _pack_timestamp(self, timestamp: datetime):
         year = struct.pack("<H", timestamp.year)
@@ -164,7 +153,7 @@ class FetchChar(Characteristic):
             self.next_timestamp = datetime(year, month, day, hour, minute)
             print(f"actually fetching data from {self.next_timestamp}")
             # self.pkg = 0
-            self.write(b'\x02')
+            await self.write(b'\x02')
         elif data[:3] == b'\x10\x02\x01':
             if self.activity_getter.last_timestamp > self.activity_getter.end_timestamp - timedelta(minutes=1):
                 print("Finished fetching")
@@ -203,7 +192,7 @@ class AuthenticateChar(Characteristic):
     async def _callback(self, char_specifier, data):
         print(f"LOG [AUTH]: {data}")
         if data[:3] == b'\x10\x01\x01':
-            self.write(RANDOM_BYTE)
+            await self.write(RANDOM_BYTE)
         elif data[:3] == b'\x10\x01\x04':
             self.wac.state = AUTH_STATES.KEY_SENDING_FAILED
         elif data[:3] == b'\x10\x02\x01':
@@ -242,8 +231,8 @@ async def main():
     auth_char = await a.createChar(UUIDS.CHARACTERISTIC_AUTH, special_type="AUTH")
     await auth_char.init_handler()
     await auth_char.connect()
-    auth_desc = Descriptor("00002902-0000-1000-8000-00805f9b34fb", a.client)
-    await auth_desc.write(b"\x01\x00")
+    # auth_desc = Descriptor(97, a.client)
+    # await auth_desc.write(b"\x01\x00")
     # try:
     # step = await a.createChar(UUIDS.CHARACTERISTIC_STEPS, "STEP")
     # print(await step.read())
@@ -255,7 +244,7 @@ async def main():
     activity_getter = ActivityGetter(utc_offset, a.client)
     await activity_getter.get()
 
-    await auth_desc.write(b"\x00\x00")
+    # await auth_desc.write(b"\x00\x00")
 
     # except Exception as e:
     #     print(e)
@@ -263,4 +252,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(main())
+    loop.run_forever()
