@@ -91,12 +91,22 @@ class ActivityGetter:
         self.next_timestamp = self.start
         self.utc_offset = utc_offset
         self.client = client
+        self.pkg = 0
+        self.lock = asyncio.Lock()
 
         self.fetch_char = FetchChar(
-            self.next_timestamp, UUIDS.CHARACTERISTIC_FETCH, client)
+            self, UUIDS.CHARACTERISTIC_FETCH, client)
 
         self.activity_char = ActivityChar(
-            UUIDS.CHARACTERISTIC_ACTIVITY_DATA, client)
+            self, UUIDS.CHARACTERISTIC_ACTIVITY_DATA, client)
+
+    async def set_next_timestamp(self, new_value):
+        # async with self.lock:
+        self.next_timestamp = new_value
+
+    async def get_next_timestamp(self):
+        # async with self.lock:
+        return self.next_timestamp
 
     async def get(self):
         await self.fetch_char.init_handler()
@@ -105,31 +115,38 @@ class ActivityGetter:
 
 
 class ActivityChar(Characteristic):
-    def __init__(self, char_specifier: str, client: BleakClient) -> None:
+    def __init__(self, activity_getter: ActivityGetter, char_specifier: str, client: BleakClient) -> None:
         super().__init__(char_specifier, client)
+        self.activity_getter = activity_getter
+        self.lock = asyncio.Lock()
 
     async def _callback(self, _, data):
         print(f"LOG [Activity]: {data}")
-        i = 1
-        while i < len(data):
-            category = struct.unpack("<B", data[i:i + 1])[0]
-            intensity = struct.unpack("B", data[i + 1:i + 2])[0]
-            steps = struct.unpack("B", data[i + 2:i + 3])[0]
-            heart_rate = struct.unpack("B", data[i + 3:i + 4])[0]
-            print(category, intensity, steps, heart_rate)
-            i += 4
+        if len(data) % 4 == 1:
+            self.activity_getter.pkg += 1
+            i = 1
+            while i < len(data):
+                # index = int(self.activity_getter.pkg) * 4 + (i - 1) / 4
+                timestamp = (await self.activity_getter.get_next_timestamp()) + timedelta(minutes=1)
+                category = struct.unpack("<B", data[i:i + 1])[0]
+                intensity = struct.unpack("B", data[i + 1:i + 2])[0]
+                steps = struct.unpack("B", data[i + 2:i + 3])[0]
+                heart_rate = struct.unpack("B", data[i + 3:i + 4])[0]
+                print(timestamp, category, intensity, steps, heart_rate)
+                await self.activity_getter.set_next_timestamp(timestamp)
+                i += 4
 
     async def init_handler(self):
         await self.client.start_notify(self.char_specifier, self._callback)
 
 
 class FetchChar(Characteristic):
-    def __init__(self, next_timestamp: datetime, char_specifier: str, client: BleakClient):
+    def __init__(self, activity_getter: ActivityGetter, char_specifier: str, client: BleakClient):
         super().__init__(char_specifier, client)
-        self.next_timestamp = next_timestamp
+        self.activity_getter = activity_getter
 
     async def send_fetch_payload(self, utc_offset: bytearray):
-        ts = self._pack_timestamp(self.next_timestamp)
+        ts = self._pack_timestamp(self.activity_getter.next_timestamp)
         payload = b'\x01\x01' + ts + utc_offset
         await self.write(payload)
 
@@ -150,18 +167,19 @@ class FetchChar(Characteristic):
             day = struct.unpack("b", data[10:11])[0]
             hour = struct.unpack("b", data[11:12])[0]
             minute = struct.unpack("b", data[12:13])[0]
-            self.next_timestamp = datetime(year, month, day, hour, minute)
-            print(f"actually fetching data from {self.next_timestamp}")
-            # self.pkg = 0
+            self.activity_getter.next_timestamp = datetime(year, month, day, hour, minute)
+            print(f"actually fetching data from {self.activity_getter.next_timestamp}")
+            self.activity_getter.pkg = 0
             await self.write(b'\x02')
         elif data[:3] == b'\x10\x02\x01':
-            if self.activity_getter.last_timestamp > self.activity_getter.end_timestamp - timedelta(minutes=1):
+            print(f"stopped at {self.activity_getter.next_timestamp}")
+            if self.activity_getter.next_timestamp > self.activity_getter.end - timedelta(minutes=1):
                 print("Finished fetching")
                 return
             await asyncio.sleep(1)
-            t = self.device.last_timestamp + timedelta(minutes=1)
+            t = self.activity_getter.next_timestamp + timedelta(minutes=1)
             print(f"Trigger more communication {t}")
-            self.send_fetch_payload(t)
+            await self.send_fetch_payload(t)
 
         elif data[:3] == b'\x10\x02\x04':
             print("No more activity fetch possible")
