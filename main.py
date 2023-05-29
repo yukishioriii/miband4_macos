@@ -12,6 +12,7 @@ RANDOM_BYTE = struct.pack('<2s', b'\x02\x00')
 DEFAULT_TIMEOUT = 0.5
 with open("secret.txt", "r") as f:
     MAC_ADDRESS, AUTH_KEY = f.read().split("\n")
+MAX_CHUNKLENGTH = 17
 
 
 class Characteristic:
@@ -24,6 +25,13 @@ class Characteristic:
 
     async def read(self):
         return await self.client.read_gatt_char(self.char_specifier)
+
+    def _callback(self, handler, data):
+        print(f"DEFAULT {handler} {data}")
+        pass
+
+    async def init_handler(self):
+        await self.client.start_notify(self.char_specifier, self._callback)
 
 
 class Descriptor:
@@ -167,8 +175,10 @@ class FetchChar(Characteristic):
             day = struct.unpack("b", data[10:11])[0]
             hour = struct.unpack("b", data[11:12])[0]
             minute = struct.unpack("b", data[12:13])[0]
-            self.activity_getter.next_timestamp = datetime(year, month, day, hour, minute)
-            print(f"actually fetching data from {self.activity_getter.next_timestamp}")
+            self.activity_getter.next_timestamp = datetime(
+                year, month, day, hour, minute)
+            print(
+                f"actually fetching data from {self.activity_getter.next_timestamp}")
             self.activity_getter.pkg = 0
             await self.write(b'\x02')
         elif data[:3] == b'\x10\x02\x01':
@@ -238,6 +248,83 @@ class AuthenticateChar(Characteristic):
         await self.client.stop_notify(self.char_specifier)
 
 
+class Chunked(Characteristic):
+    def __init__(self, char_specifier: str, client: BleakClient) -> None:
+        super().__init__(char_specifier, client)
+
+    async def write(self, data_type, data):
+        remaining = len(data)
+        count = 0
+        while (remaining > 0):
+            copybytes = min(remaining, MAX_CHUNKLENGTH)
+            chunk = b''
+            flag = 0
+            if remaining <= MAX_CHUNKLENGTH:
+                flag |= 0x80
+                if count == 0:
+                    flag |= 0x40
+            elif count > 0:
+                flag |= 0x40
+
+            chunk += b'\x00'
+            chunk += bytes([flag | data_type])
+            chunk += bytes([count & 0xff])
+            chunk += data[(count * MAX_CHUNKLENGTH)                          :(count*MAX_CHUNKLENGTH)+copybytes]
+            count += 1
+            await self.client.write_gatt_char(self.char_specifier, chunk)
+            remaining -= copybytes
+
+
+class MusicChar(Characteristic):
+    def __init__(self, char_specifier: str, client: BleakClient, callback) -> None:
+        super().__init__(char_specifier, client)
+        self._callback = callback
+
+    async def init_handler(self):
+        await self.client.start_notify(self.char_specifier, self._callback)
+
+
+class Music:
+    def __init__(self, client: BleakClient) -> None:
+        self.chunked = Chunked(
+            UUIDS.CHARACTERISTIC_CHUNKED_TRANSFER, client)
+        self.music_char = MusicChar(
+            UUIDS.CHARACTERISTIC_MUSIC_NOTIFICATION, client, self._callback)
+
+    async def init_handler(self):
+        await self.music_char.init_handler()
+
+    async def _callback(self, _, data):
+        cmd = data[1:][0] if len(data[1:]) > 0 else None
+        if cmd == 0xe0:
+            await self.set_music()
+        elif cmd == 0xe1:
+            print("out")
+        elif cmd == 0x00:
+            print("play")
+        elif cmd == 0x01:
+            print("pause")
+
+    async def set_music(self):
+        flag = 0x00
+        flag |= 0x01
+        buf = b''
+        null = b'\x00'
+        flag |= 0x02
+        buf += "self.artist".encode('utf-8') + null
+        flag |= 0x04
+        buf += "self.album".encode('utf-8') + null
+        flag |= 0x08
+        buf += "self.track".encode('utf-8') + null
+        flag |= 0x10
+        buf += struct.pack('<H', 69)
+        flag |= 0x40
+        buf += bytes([69]) + null
+        position = struct.pack('<H', 30)
+        buf = bytes([flag, 1, 0x00]) + position + buf
+        await self.chunked.write(3, buf)
+
+
 async def main():
     b = None
     while b is None:
@@ -261,6 +348,13 @@ async def main():
 
     activity_getter = ActivityGetter(utc_offset, a.client)
     await activity_getter.get()
+
+    # custom_alert = await a.createChar(UUIDS.CHARACTERISTIC_CUSTOM_ALERT)
+    # await custom_alert.write(bytes('\x05\x01' + "ur mom" + '\x0a\x0a\x0a' + "omega lul", 'utf-8'), True)
+
+    # music = Music(a.client)
+    # await music.init_handler()
+    # await music.set_music()
 
     # await auth_desc.write(b"\x00\x00")
 
