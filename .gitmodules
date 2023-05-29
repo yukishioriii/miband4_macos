@@ -7,3 +7,6 @@
 [submodule "bluepy"]
 	path = bluepy
 	url = git@github.com:IanHarvey/bluepy.git
+[submodule "Gadgetbridge"]
+	path = Gadgetbridge
+	url = https://codeberg.org/Freeyourgadget/Gadgetbridge.git
